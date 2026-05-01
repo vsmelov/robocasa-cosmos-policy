@@ -275,6 +275,7 @@ from robocasa.environments.kitchen.single_stage.kitchen_pnp import (
     PnPCounterToCab,
     PnPCounterToMicrowave,
     PnPCounterToSink,
+    PnPDrawerToCounter,
     PnPMicrowaveToCounter,
     PnPSinkToCounter,
 )

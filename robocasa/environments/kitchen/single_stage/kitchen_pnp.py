@@ -255,6 +255,80 @@ class PnPCabToCounter(PnP):
         return obj_on_counter and gripper_obj_far
 
 
+class PnPDrawerToCounter(PnP):
+    """
+    Pick an object from a kitchen drawer and place it on the adjacent counter.
+
+    On reset the drawer is opened so the object is reachable (mirrors post-``OpenDrawer`` chain state).
+    """
+
+    def __init__(
+        self,
+        drawer_id=FixtureType.TOP_DRAWER,
+        obj_groups="all",
+        exclude_obj_groups=None,
+        *args,
+        **kwargs,
+    ):
+        self.drawer_id = drawer_id
+        super().__init__(obj_groups=obj_groups, exclude_obj_groups=exclude_obj_groups, *args, **kwargs)
+
+    def _setup_kitchen_references(self):
+        super()._setup_kitchen_references()
+        self.drawer = self.register_fixture_ref("drawer", dict(id=self.drawer_id))
+        self.counter = self.register_fixture_ref(
+            "counter",
+            dict(id=FixtureType.COUNTER, ref=self.drawer),
+        )
+        self.init_robot_base_pos = self.drawer
+
+    def get_ep_meta(self):
+        ep_meta = super().get_ep_meta()
+        obj_lang = self.get_obj_lang()
+        ep_meta["lang"] = f"pick the {obj_lang} from the drawer and place it on the counter"
+        return ep_meta
+
+    def _reset_internal(self):
+        super()._reset_internal()
+        self.drawer.set_door_state(min=0.90, max=1.0, env=self, rng=self.rng)
+
+    def _get_obj_cfgs(self):
+        cfgs = []
+        cfgs.append(
+            dict(
+                name="obj",
+                obj_groups=self.obj_groups,
+                exclude_obj_groups=self.exclude_obj_groups,
+                graspable=True,
+                max_size=(None, None, 0.10),
+                placement=dict(
+                    fixture=self.drawer,
+                    size=(0.30, 0.30),
+                    pos=(None, -0.75),
+                ),
+            )
+        )
+        cfgs.append(
+            dict(
+                name="distr_counter",
+                obj_groups="all",
+                placement=dict(
+                    fixture=self.counter,
+                    sample_region_kwargs=dict(ref=self.drawer),
+                    size=(1.0, 0.30),
+                    pos=(0.0, 1.0),
+                    offset=(0.0, -0.05),
+                ),
+            )
+        )
+        return cfgs
+
+    def _check_success(self):
+        gripper_obj_far = OU.gripper_obj_far(self)
+        obj_on_counter = OU.check_obj_fixture_contact(self, "obj", self.counter)
+        return obj_on_counter and gripper_obj_far
+
+
 class PnPCounterToSink(PnP):
     """
     Class encapsulating the atomic counter to sink pick and place task
@@ -722,7 +796,11 @@ class PnPMicrowaveToCounter(PnP):
         """
         obj_container_contact = OU.check_obj_in_receptacle(self, "obj", "container")
         gripper_obj_far = OU.gripper_obj_far(self)
-        return obj_container_contact and gripper_obj_far
+        if not (obj_container_contact and gripper_obj_far):
+            return False
+        if OU.obj_inside_of(self, "obj", self.microwave):
+            return False
+        return True
 
 
 class PnPCounterToStove(PnP):

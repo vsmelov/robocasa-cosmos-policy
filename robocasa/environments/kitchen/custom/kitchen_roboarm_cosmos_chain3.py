@@ -3,6 +3,7 @@
 - ``PnPRoboarmCosmosChain3``: stove PnP → counter→microwave → start button.
 - ``PnPRoboarmCosmosChain2MicrowaveCloseOn``: close microwave door → start button.
 - ``PnPRoboarmCosmosChain2DrawerOpenClose``: open top drawer → close it.
+- ``PnPRoboarmCosmosChain3DrawerPotatoOpenPnPClose``: open drawer → potato drawer→counter → close drawer.
 - ``PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen``: close MW → arm home → on → arm home → off → arm home → open door.
 - ``PnPRoboarmCosmosChain6PotatoMwPlate``: counter→MW (potato) → close → on → off → open → MW→counter (plate).
 
@@ -30,13 +31,24 @@ CHAIN4_TURNOFF_PROXIMITY_M = 0.01
 def mw_stop_proximity_threshold_m() -> float:
     """Distance cap (m) for stop-button proximity success; does not affect start-button stage.
 
-    Override: ``CHAIN_MW_STOP_PROXIMITY_M`` (float meters). Default ~4.2 cm to account for EEF vs probe tip vs
+    Override: ``CHAIN_MW_STOP_PROXIMITY_M`` (float meters). Default ~5.5 cm to account for EEF vs probe tip vs
     ``stop_button`` geom center (not panel surface).
     """
     raw = os.environ.get("CHAIN_MW_STOP_PROXIMITY_M", "").strip()
     if raw:
         return float(raw)
-    return 0.042
+    return 0.055
+
+
+def mw_microwave_door_open_success_min_frac() -> float:
+    """Minimum normalized microwave hinge openness [0, 1] for «door open» success in chain4/chain6.
+
+    RoboCasa uses ``normalize_joint_value`` on the micro hinge; requiring 0.90 often fails when the door is
+    visually open but the gripper limits the last few degrees. Override: ``CHAIN_MW_OPEN_DOOR_SUCCESS_FRAC``.
+    """
+    raw = os.environ.get("CHAIN_MW_OPEN_DOOR_SUCCESS_FRAC", "").strip()
+    v = float(raw) if raw else 0.82
+    return float(np.clip(v, 0.15, 0.99))
 
 
 def _chain_turnoff_debug_log_pre_step_enabled() -> bool:
@@ -604,8 +616,9 @@ class PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen(Kitchen):
                 mw._turned_on = False
                 return True
             return False
+        th_open = mw_microwave_door_open_success_min_frac()
         for joint_p in door_state.values():
-            if joint_p < 0.90:
+            if joint_p < th_open:
                 return False
         return True
 
@@ -756,11 +769,102 @@ class PnPRoboarmCosmosChain6PotatoMwPlate(Kitchen):
             return False
         if self._chain_stage == 4:
             door_state = self.microwave.get_door_state(env=self)
+            th_open = mw_microwave_door_open_success_min_frac()
             for joint_p in door_state.values():
-                if joint_p < 0.90:
+                if joint_p < th_open:
                     return False
             return True
-        return OU.check_obj_in_receptacle(self, "obj", "container") and OU.gripper_obj_far(self)
+        # PnPMicrowaveToCounter: require potato on plate on counter, gripper clear, and potato not still inside MW volume.
+        if not OU.check_obj_in_receptacle(self, "obj", "container") or not OU.gripper_obj_far(self):
+            return False
+        if OU.obj_inside_of(self, "obj", self.microwave):
+            return False
+        return True
+
+
+class PnPRoboarmCosmosChain3DrawerPotatoOpenPnPClose(OpenDrawer):
+    """
+    Open the top drawer → pick ``obj`` (default potato) from the drawer onto the counter → close the drawer.
+    One uninterrupted simulation; arm returns home after stages 0 and 1 (before PnP and before close).
+    """
+
+    CHAIN_STAGE_HORIZON_NAMES = ("OpenDrawer", "PnPDrawerToCounter", "CloseDrawer")
+    CHAIN_RESET_ARM_AFTER_STAGES = (0, 1)
+    EXCLUDE_LAYOUTS = [8]
+
+    def __init__(self, obj_groups=("potato",), exclude_obj_groups=None, *args, **kwargs):
+        self.obj_groups = obj_groups
+        self.exclude_obj_groups = exclude_obj_groups
+        kwargs.setdefault("obj_registries", ("aigen", "objaverse"))
+        super().__init__(*args, **kwargs)
+        self._chain_stage = 0
+        self._chain_init_arm_qpos = None
+        self._chain_init_gripper_qpos = None
+
+    def _reset_internal(self):
+        super()._reset_internal()
+        self._chain_stage = 0
+        _snapshot_chain_init_arm_gripper(self)
+
+    def advance_chain_stage(self):
+        last = len(type(self).CHAIN_STAGE_HORIZON_NAMES) - 1
+        if self._chain_stage < last:
+            completed = self._chain_stage
+            self._chain_stage += 1
+            if completed in getattr(type(self), "CHAIN_RESET_ARM_AFTER_STAGES", ()):
+                _restore_chain_init_arm_gripper_smooth(self)
+
+    @property
+    def chain_stage(self) -> int:
+        return self._chain_stage
+
+    def get_ep_meta(self):
+        ep_meta = Kitchen.get_ep_meta(self)
+        if self._chain_stage == 0:
+            ep_meta["lang"] = f"open the {self.drawer_side} drawer"
+        elif self._chain_stage == 1:
+            obj_lang = self.get_obj_lang()
+            ep_meta["lang"] = f"pick the {obj_lang} from the drawer and place it on the counter"
+        else:
+            ep_meta["lang"] = f"close the {self.drawer_side} drawer"
+        return ep_meta
+
+    def _get_obj_cfgs(self):
+        """``obj`` in closed drawer at reset (same layout as ``OpenDrawer`` but name matches PnP success)."""
+        cfgs = []
+        cfgs.append(
+            dict(
+                name="obj",
+                obj_groups=self.obj_groups,
+                exclude_obj_groups=self.exclude_obj_groups,
+                graspable=True,
+                max_size=(None, None, 0.10),
+                placement=dict(
+                    fixture=self.drawer,
+                    size=(0.30, 0.30),
+                    pos=(None, -0.75),
+                ),
+            )
+        )
+        # No counter distractors: ``obj_groups`` in (all, food, …) with (aigen, objaverse) can still pick a
+        # category whose total MJCF path count is 0 → NaN in sample_kitchen_object_helper. OpenDrawer uses
+        # ``all``; we only need ``obj`` in the drawer for this chain benchmark.
+        return cfgs
+
+    def _check_success(self):
+        door_state = self.drawer.get_door_state(env=self)
+        if self._chain_stage == 0:
+            for joint_p in door_state.values():
+                if joint_p < 0.95:
+                    return False
+            return True
+        if self._chain_stage == 1:
+            counter = self.get_fixture(FixtureType.COUNTER, ref=self.drawer)
+            return OU.check_obj_fixture_contact(self, "obj", counter) and OU.gripper_obj_far(self)
+        for joint_p in door_state.values():
+            if joint_p > 0.05:
+                return False
+        return True
 
 
 class PnPRoboarmCosmosChain2DrawerOpenClose(OpenDrawer):
