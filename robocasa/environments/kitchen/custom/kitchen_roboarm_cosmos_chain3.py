@@ -13,6 +13,7 @@ Canonical copy lives in the ``vsmelov/robocasa-cosmos-policy`` fork (git submodu
 """
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,8 +23,25 @@ from robocasa.environments.kitchen.kitchen import *
 from robocasa.environments.kitchen.single_stage.kitchen_drawer import OpenDrawer
 from robocasa.environments.kitchen.single_stage.kitchen_pnp import PnP
 
-# Turn-off stage (chain4): success if gripper touches stop OR min distance (eef / finger geoms / sites) ≤ this (m).
+# Historical 10 mm line in JSONL only; success uses ``mw_stop_proximity_threshold_m()`` (stop geom / contact only).
 CHAIN4_TURNOFF_PROXIMITY_M = 0.01
+
+
+def mw_stop_proximity_threshold_m() -> float:
+    """Distance cap (m) for stop-button proximity success; does not affect start-button stage.
+
+    Override: ``CHAIN_MW_STOP_PROXIMITY_M`` (float meters). Default ~4.2 cm to account for EEF vs probe tip vs
+    ``stop_button`` geom center (not panel surface).
+    """
+    raw = os.environ.get("CHAIN_MW_STOP_PROXIMITY_M", "").strip()
+    if raw:
+        return float(raw)
+    return 0.042
+
+
+def _chain_turnoff_debug_log_pre_step_enabled() -> bool:
+    """If true, log a JSONL line before ``super().step`` as well as after (2× per control step)."""
+    return os.environ.get("CHAIN_MW_TURNOFF_DEBUG_PRE", "1").strip().lower() not in ("0", "false", "no", "")
 
 # Panda-Omron / composite grippers often omit "finger" in geom names; include gripper/hand so proximity uses real pads.
 _FINGER_GEOM_KEYS = ("pad", "finger", "fingertip", "tip", "touch", "gripper", "hand")
@@ -107,6 +125,7 @@ def chain4_turnoff_debug_snapshot(env) -> dict:
     far_stop = bool(mw.gripper_button_far(env, button="stop_button"))
     stop_c = bool(env.check_contact(robot.gripper["right"], f"{mw.name}_stop_button"))
     start_c = bool(env.check_contact(robot.gripper["right"], f"{mw.name}_start_button"))
+    th = mw_stop_proximity_threshold_m()
     return {
         "chain_stage": int(getattr(env, "chain_stage")),
         "distance_best_to_stop_m": d_best,
@@ -118,6 +137,8 @@ def chain4_turnoff_debug_snapshot(env) -> dict:
         "door_state": door,
         "gripper_far_stop_th0_15m": far_stop,
         "proximity_lte_1cm": d_best <= CHAIN4_TURNOFF_PROXIMITY_M,
+        "proximity_ok_stop": d_best <= th,
+        "proximity_threshold_m": th,
         "start_button_contact": start_c,
         "stop_button_contact": stop_c,
         "turned_on": turned_on,
@@ -131,8 +152,12 @@ _CHAIN_TURNOFF_DEBUG_STAGE_BY_CLASS = {
 }
 
 
-def _chain_turnoff_step_debug_maybe(env) -> None:
-    """If orchestrator opened ``_chain4_turnoff_debug_fp``, append one JSONL line (chain4 st2 / chain6 st3)."""
+def _chain_turnoff_step_debug_maybe(env, *, phase: str = "post") -> None:
+    """If orchestrator opened ``_chain4_turnoff_debug_fp``, append JSONL (chain4 st2 / chain6 st3).
+
+    ``phase`` is ``pre`` (before physics for this action) or ``post`` (after ``super().step``) — two lines per
+    control step when pre-logging is enabled (``_chain_turnoff_debug_log_pre_step_enabled()``).
+    """
     fp = getattr(env, "_chain4_turnoff_debug_fp", None)
     if fp is None:
         return
@@ -140,6 +165,7 @@ def _chain_turnoff_step_debug_maybe(env) -> None:
     if want is None or int(getattr(env, "_chain_stage")) != want:
         return
     row = chain4_turnoff_debug_snapshot(env)
+    row["debug_step_phase"] = phase
     fp.write(json.dumps(row, sort_keys=True) + "\n")
     env._chain4_turnoff_min_eef = min(
         getattr(env, "_chain4_turnoff_min_eef", float("inf")), float(row["distance_eef_to_stop_m"])
@@ -536,8 +562,10 @@ class PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen(Kitchen):
         return ep_meta
 
     def step(self, action):
+        if _chain_turnoff_debug_log_pre_step_enabled():
+            _chain_turnoff_step_debug_maybe(self, phase="pre")
         obs, reward, done, info = super().step(action)
-        _chain_turnoff_step_debug_maybe(self)
+        _chain_turnoff_step_debug_maybe(self, phase="post")
         return obs, reward, done, info
 
     def _get_obj_cfgs(self):
@@ -572,7 +600,7 @@ class PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen(Kitchen):
             robot = self.robots[0]
             d_best = chain4_turnoff_best_distance_to_stop(self)
             contact = bool(self.check_contact(robot.gripper["right"], f"{mw.name}_stop_button"))
-            if contact or d_best <= CHAIN4_TURNOFF_PROXIMITY_M:
+            if contact or d_best <= mw_stop_proximity_threshold_m():
                 mw._turned_on = False
                 return True
             return False
@@ -667,8 +695,10 @@ class PnPRoboarmCosmosChain6PotatoMwPlate(Kitchen):
         return ep_meta
 
     def step(self, action):
+        if _chain_turnoff_debug_log_pre_step_enabled():
+            _chain_turnoff_step_debug_maybe(self, phase="pre")
         obs, reward, done, info = super().step(action)
-        _chain_turnoff_step_debug_maybe(self)
+        _chain_turnoff_step_debug_maybe(self, phase="post")
         return obs, reward, done, info
 
     def _get_obj_cfgs(self):
@@ -720,7 +750,7 @@ class PnPRoboarmCosmosChain6PotatoMwPlate(Kitchen):
             robot = self.robots[0]
             d_best = chain4_turnoff_best_distance_to_stop(self)
             contact = bool(self.check_contact(robot.gripper["right"], f"{mw.name}_stop_button"))
-            if contact or d_best <= CHAIN4_TURNOFF_PROXIMITY_M:
+            if contact or d_best <= mw_stop_proximity_threshold_m():
                 mw._turned_on = False
                 return True
             return False
