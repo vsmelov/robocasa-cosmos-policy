@@ -25,8 +25,9 @@ from robocasa.environments.kitchen.single_stage.kitchen_pnp import PnP
 # Turn-off stage (chain4): success if gripper touches stop OR min distance (eef / finger geoms / sites) ≤ this (m).
 CHAIN4_TURNOFF_PROXIMITY_M = 0.01
 
-_FINGER_GEOM_KEYS = ("pad", "finger", "fingertip", "tip", "touch")
-_FINGER_SITE_KEYS = ("pad", "finger", "fingertip", "tip", "touch", "grip")
+# Panda-Omron / composite grippers often omit "finger" in geom names; include gripper/hand so proximity uses real pads.
+_FINGER_GEOM_KEYS = ("pad", "finger", "fingertip", "tip", "touch", "gripper", "hand")
+_FINGER_SITE_KEYS = ("pad", "finger", "fingertip", "tip", "touch", "grip", "gripper", "hand")
 
 
 def _distance_eef_to_microwave_button(env, microwave, button: str) -> float:
