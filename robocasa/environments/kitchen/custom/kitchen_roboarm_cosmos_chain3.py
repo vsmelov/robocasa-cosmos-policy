@@ -675,16 +675,6 @@ class PnPRoboarmCosmosChain6PotatoMwPlate(Kitchen):
                     ensure_object_boundary_in_range=False,
                 ),
             ),
-            dict(
-                name="distr_counter",
-                obj_groups="all",
-                placement=dict(
-                    fixture=self.distr_counter,
-                    sample_region_kwargs=dict(ref=self.microwave),
-                    size=(0.30, 0.30),
-                    pos=("ref", 1.0),
-                ),
-            ),
         ]
 
     def _check_success(self):
