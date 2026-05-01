@@ -6,6 +6,7 @@
 - ``PnPRoboarmCosmosChain3DrawerPotatoOpenPnPClose``: open drawer → potato drawer→counter → close drawer.
 - ``PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen``: close MW → arm home → on → arm home → off → arm home → open door.
 - ``PnPRoboarmCosmosChain6PotatoMwPlate``: counter→MW (potato) → close → on → off → open → MW→counter (plate).
+- ``PnPRoboarmCosmosChainRecipeStoveMwV1``: potato→pan+stove on; carrot→MW heat; MW→counter; stove off (atomic horizons).
 
 Each chain class defines ``CHAIN_STAGE_HORIZON_NAMES`` for horizon / T5 lookup in eval.
 
@@ -161,6 +162,7 @@ def chain4_turnoff_debug_snapshot(env) -> dict:
 _CHAIN_TURNOFF_DEBUG_STAGE_BY_CLASS = {
     "PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen": 2,
     "PnPRoboarmCosmosChain6PotatoMwPlate": 3,
+    "PnPRoboarmCosmosChainRecipeStoveMwV1": 6,
 }
 
 
@@ -909,3 +911,232 @@ class PnPRoboarmCosmosChain2DrawerOpenClose(OpenDrawer):
             if joint_p > 0.05:
                 return False
         return True
+
+
+class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
+    """
+    Minimal multi-appliance «recipe» in one sim (atomic horizon names for Cosmos T5).
+
+    Stages: potato from counter into pan on stove → burner on → open MW → carrot+plate into MW →
+    close MW → MW on → MW off → open MW → carrot on plate on counter → burner off.
+
+    Objects: ``obj`` (potato, cookable), ``container`` (pan on stove), ``obj_mw`` (carrot), ``mw_plate`` (plate in MW).
+    """
+
+    CHAIN_STAGE_HORIZON_NAMES = (
+        "PnPCounterToStove",
+        "TurnOnStove",
+        "OpenSingleDoor",
+        "PnPCounterToMicrowave",
+        "CloseSingleDoor",
+        "TurnOnMicrowave",
+        "TurnOffMicrowave",
+        "OpenSingleDoor",
+        "PnPMicrowaveToCounter",
+        "TurnOffStove",
+    )
+    CHAIN_RESET_ARM_AFTER_STAGES = (0, 1, 2, 3, 4, 5, 6, 7, 8)
+    EXCLUDE_LAYOUTS = [8]
+
+    def __init__(
+        self,
+        obj_groups=("potato",),
+        obj_mw_groups=("carrot",),
+        exclude_obj_groups=None,
+        exclude_obj_mw_groups=None,
+        *args,
+        **kwargs,
+    ):
+        self.obj_groups = obj_groups
+        self.obj_mw_groups = obj_mw_groups
+        self.exclude_obj_groups = exclude_obj_groups
+        self.exclude_obj_mw_groups = exclude_obj_mw_groups
+        kwargs.setdefault("obj_registries", ("aigen", "objaverse"))
+        super().__init__(*args, **kwargs)
+        self._chain_stage = 0
+        self._chain_init_arm_qpos = None
+        self._chain_init_gripper_qpos = None
+        self._recipe_knob = None
+
+    def _setup_kitchen_references(self):
+        super()._setup_kitchen_references()
+        self.stove = self.register_fixture_ref("stove", dict(id=FixtureType.STOVE))
+        self.counter_stove = self.register_fixture_ref(
+            "counter_stove", dict(id=FixtureType.COUNTER, ref=self.stove, size=[0.30, 0.40])
+        )
+        self.microwave = self.register_fixture_ref("microwave", dict(id=FixtureType.MICROWAVE))
+        self.counter_mw = self.register_fixture_ref(
+            "counter_mw", dict(id=FixtureType.COUNTER, ref=self.microwave)
+        )
+        self.init_robot_base_pos = self.stove
+
+    def _reset_internal(self):
+        super()._reset_internal()
+        self._chain_stage = 0
+        self.microwave.set_door_state(min=0.0, max=0.0, env=self, rng=self.rng)
+        valid_knobs = [k for (k, v) in self.stove.knob_joints.items() if v is not None]
+        self._recipe_knob = self.rng.choice(list(valid_knobs))
+        self.stove.set_knob_state(mode="off", knob=self._recipe_knob, env=self, rng=self.rng)
+        _snapshot_chain_init_arm_gripper(self)
+
+    def advance_chain_stage(self):
+        last = len(type(self).CHAIN_STAGE_HORIZON_NAMES) - 1
+        if self._chain_stage < last:
+            completed = self._chain_stage
+            self._chain_stage += 1
+            if completed in getattr(type(self), "CHAIN_RESET_ARM_AFTER_STAGES", ()):
+                _restore_chain_init_arm_gripper_smooth(self)
+                if self._chain_stage in (5, 6):
+                    self.microwave.set_door_state(min=0.0, max=0.0, env=self, rng=self.rng)
+                    self.sim.forward()
+
+    @property
+    def chain_stage(self) -> int:
+        return self._chain_stage
+
+    def get_ep_meta(self):
+        ep_meta = super().get_ep_meta()
+        if self._chain_stage == 0:
+            obj_lang = self.get_obj_lang(obj_name="obj")
+            cont_lang = self.get_obj_lang(obj_name="container")
+            preposition = "on"
+            ep_meta["lang"] = f"pick the {obj_lang} from the plate and place it {preposition} the {cont_lang}"
+        elif self._chain_stage == 1:
+            ep_meta["lang"] = f"turn on the {self._recipe_knob.replace('_', ' ')} burner of the stove"
+        elif self._chain_stage == 2:
+            ep_meta["lang"] = "open the microwave door"
+        elif self._chain_stage == 3:
+            obj_lang = self.get_obj_lang(obj_name="obj_mw")
+            ep_meta["lang"] = f"pick the {obj_lang} from the counter and place it in the microwave"
+        elif self._chain_stage == 4:
+            ep_meta["lang"] = "close the microwave door"
+        elif self._chain_stage == 5:
+            ep_meta["lang"] = "press the start button on the microwave"
+        elif self._chain_stage == 6:
+            ep_meta["lang"] = "press the stop button on the microwave"
+        elif self._chain_stage == 7:
+            ep_meta["lang"] = "open the microwave door"
+        elif self._chain_stage == 8:
+            obj_lang = self.get_obj_lang(obj_name="obj_mw")
+            cont_lang = self.get_obj_lang(obj_name="mw_plate")
+            ep_meta["lang"] = (
+                f"pick the {obj_lang} from the microwave and place it on {cont_lang} located on the counter"
+            )
+        else:
+            ep_meta["lang"] = f"turn off the {self._recipe_knob.replace('_', ' ')} burner of the stove"
+        return ep_meta
+
+    def step(self, action):
+        if _chain_turnoff_debug_log_pre_step_enabled():
+            _chain_turnoff_step_debug_maybe(self, phase="pre")
+        obs, reward, done, info = super().step(action)
+        _chain_turnoff_step_debug_maybe(self, phase="post")
+        return obs, reward, done, info
+
+    def _get_obj_cfgs(self):
+        return [
+            dict(
+                name="container",
+                obj_groups=("pan",),
+                placement=dict(
+                    fixture=self.stove,
+                    ensure_object_boundary_in_range=False,
+                    size=(0.02, 0.02),
+                    rotation=[(-3 * np.pi / 8, -np.pi / 4), (np.pi / 4, 3 * np.pi / 8)],
+                ),
+            ),
+            dict(
+                name="obj",
+                obj_groups=self.obj_groups,
+                exclude_obj_groups=self.exclude_obj_groups,
+                graspable=True,
+                cookable=True,
+                placement=dict(
+                    fixture=self.counter_stove,
+                    sample_region_kwargs=dict(ref=self.stove),
+                    size=(0.30, 0.30),
+                    pos=("ref", -1.0),
+                    try_to_place_in="container",
+                ),
+            ),
+            dict(
+                name="mw_plate",
+                obj_groups=("plate",),
+                placement=dict(
+                    fixture=self.microwave,
+                    size=(0.05, 0.05),
+                    ensure_object_boundary_in_range=False,
+                ),
+            ),
+            dict(
+                name="obj_mw",
+                obj_groups=self.obj_mw_groups,
+                exclude_obj_groups=self.exclude_obj_mw_groups,
+                graspable=True,
+                microwavable=True,
+                placement=dict(
+                    fixture=self.counter_mw,
+                    sample_region_kwargs=dict(ref=self.microwave),
+                    size=(0.30, 0.30),
+                    pos=("ref", -1.0),
+                ),
+            ),
+        ]
+
+    def _mw_door_open_ok(self) -> bool:
+        th = mw_microwave_door_open_success_min_frac()
+        for joint_p in self.microwave.get_door_state(env=self).values():
+            if joint_p < th:
+                return False
+        return True
+
+    def _mw_door_closed_ok(self) -> bool:
+        for joint_p in self.microwave.get_door_state(env=self).values():
+            if joint_p > 0.05:
+                return False
+        return True
+
+    def _stove_knob_on(self) -> bool:
+        knobs_state = self.stove.get_knobs_state(env=self)
+        knob_value = knobs_state[self._recipe_knob]
+        return bool(0.35 <= np.abs(knob_value) <= 2 * np.pi - 0.35)
+
+    def _check_success(self):
+        if self._chain_stage == 0:
+            return OU.check_obj_in_receptacle(self, "obj", "container", th=0.07) and OU.gripper_obj_far(self)
+        if self._chain_stage == 1:
+            return self._stove_knob_on()
+        if self._chain_stage == 2:
+            return self._mw_door_open_ok()
+        if self._chain_stage == 3:
+            oc = self.check_contact(self.objects["obj_mw"], self.objects["mw_plate"])
+            mc = self.check_contact(self.objects["mw_plate"], self.microwave)
+            return oc and mc and OU.gripper_obj_far(self, obj_name="obj_mw")
+        if self._chain_stage == 4:
+            return self._mw_door_closed_ok()
+        if self._chain_stage == 5:
+            turned_on = self.microwave.get_state()["turned_on"]
+            far = self.microwave.gripper_button_far(self, button="start_button")
+            return bool(turned_on and far)
+        if self._chain_stage == 6:
+            mw = self.microwave
+            robot = self.robots[0]
+            d_best = chain4_turnoff_best_distance_to_stop(self)
+            contact = bool(self.check_contact(robot.gripper["right"], f"{mw.name}_stop_button"))
+            if contact or d_best <= mw_stop_proximity_threshold_m():
+                mw._turned_on = False
+                return True
+            return False
+        if self._chain_stage == 7:
+            return self._mw_door_open_ok()
+        if self._chain_stage == 8:
+            if not OU.check_obj_in_receptacle(self, "obj_mw", "mw_plate"):
+                return False
+            if not self.check_contact(self.objects["mw_plate"], self.counter_mw):
+                return False
+            if not OU.gripper_obj_far(self, obj_name="obj_mw"):
+                return False
+            if OU.obj_inside_of(self, "obj_mw", self.microwave):
+                return False
+            return True
+        return not self._stove_knob_on()
