@@ -4,6 +4,7 @@
 - ``PnPRoboarmCosmosChain2MicrowaveCloseOn``: close microwave door → start button.
 - ``PnPRoboarmCosmosChain2DrawerOpenClose``: open top drawer → close it.
 - ``PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen``: close MW → arm home → on → arm home → off → arm home → open door.
+- ``PnPRoboarmCosmosChain6PotatoMwPlate``: counter→MW (potato) → close → on → off → open → MW→counter (plate).
 
 Each chain class defines ``CHAIN_STAGE_HORIZON_NAMES`` for horizon / T5 lookup in eval.
 
@@ -15,7 +16,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import mujoco
 import numpy as np
 
 from robocasa.environments.kitchen.kitchen import *
@@ -47,7 +47,7 @@ def _min_finger_geom_dist_to_mw_button(env, microwave, button: str) -> tuple[flo
     best = float("inf")
     n = 0
     for j in range(model.ngeom):
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, j)
+        name = model.geom_id2name(j)
         if not name or not name.startswith(pf):
             continue
         tail = name[len(pf) :].lower()
@@ -68,7 +68,7 @@ def _min_finger_site_dist_to_mw_button(env, microwave, button: str) -> tuple[flo
     best = float("inf")
     n = 0
     for sid in range(model.nsite):
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, sid)
+        name = model.site_id2name(sid)
         if not name or not name.startswith(pf):
             continue
         tail = name[len(pf) :].lower()
@@ -198,6 +198,60 @@ def _restore_chain_init_arm_gripper(env):
     sim.forward()
 
 
+# Default duration for linear joint blend to episode-init arm pose between chain stages (seconds).
+CHAIN_ARM_HOME_DURATION_S = 1.0
+
+
+def _restore_chain_init_arm_gripper_smooth(env, duration_s=None):
+    """
+    Linearly interpolate arm (+ gripper) qpos to the snapshot from ``_snapshot_chain_init_arm_gripper``
+    over ``duration_s`` seconds at ``env.control_freq`` substeps (no OSC ``step`` — only ``sim.forward``).
+
+    Optional ``env._chain_arm_home_capture_cb`` callable ``f(env)`` invoked after each substep forward
+    (e.g. Cosmos appends camera frames for run-level video).
+    """
+    dur = float(CHAIN_ARM_HOME_DURATION_S if duration_s is None else duration_s)
+    if getattr(env, "_chain_init_arm_qpos", None) is None:
+        return
+    if dur <= 0.0:
+        _restore_chain_init_arm_gripper(env)
+        return
+    robot = env.robots[0]
+    sim = env.sim
+    cf = float(getattr(env, "control_freq", 20) or 20)
+    n = max(2, int(round(dur * cf)))
+    arm_i = np.asarray(robot._ref_arm_joint_pos_indexes, dtype=int)
+    grip_i = _chain_flat_gripper_qpos_indices(robot)
+    start_arm = np.array(sim.data.qpos[arm_i], dtype=np.float64, copy=True)
+    tgt_arm = np.asarray(env._chain_init_arm_qpos, dtype=np.float64)
+    start_grip = (
+        np.array(sim.data.qpos[grip_i], dtype=np.float64, copy=True) if grip_i.size else None
+    )
+    tgt_grip = (
+        np.asarray(env._chain_init_gripper_qpos, dtype=np.float64)
+        if (grip_i.size and env._chain_init_gripper_qpos is not None)
+        else None
+    )
+    arm_vi = np.asarray(getattr(robot, "_ref_arm_joint_vel_indexes", []), dtype=int)
+    grip_vi = _chain_flat_gripper_vel_indices(robot)
+    cap = getattr(env, "_chain_arm_home_capture_cb", None)
+    for k in range(1, n + 1):
+        alpha = k / float(n)
+        sim.data.qpos[arm_i] = (1.0 - alpha) * start_arm + alpha * tgt_arm
+        if grip_i.size and tgt_grip is not None and start_grip is not None:
+            sim.data.qpos[grip_i] = (1.0 - alpha) * start_grip + alpha * tgt_grip
+        if arm_vi.size:
+            sim.data.qvel[arm_vi] = 0.0
+        if grip_vi.size:
+            sim.data.qvel[grip_vi] = 0.0
+        sim.forward()
+        if cap is not None:
+            try:
+                cap(env)
+            except Exception:
+                pass
+
+
 class PnPRoboarmCosmosChain3(PnP):
     """
     Stove → counter (PnP pan), then counter → microwave, then turn on microwave,
@@ -240,7 +294,7 @@ class PnPRoboarmCosmosChain3(PnP):
             completed = self._chain_stage
             self._chain_stage += 1
             if completed in getattr(type(self), "CHAIN_RESET_ARM_AFTER_STAGES", ()):
-                _restore_chain_init_arm_gripper(self)
+                _restore_chain_init_arm_gripper_smooth(self)
 
     @property
     def chain_stage(self) -> int:
@@ -320,6 +374,9 @@ class PnPRoboarmCosmosChain2MicrowaveCloseOn(Kitchen):
     EXCLUDE_LAYOUTS = [8]
 
     def __init__(self, *args, **kwargs):
+        # Potato (and many microwavable foods) ship MJCFs under aigen_objs; default Kitchen uses objaverse only,
+        # which can leave zero candidates and break rng.choice(probabilities) with NaN.
+        kwargs.setdefault("obj_registries", ("aigen", "objaverse"))
         super().__init__(*args, **kwargs)
         self._chain_stage = 0
         self._chain_init_arm_qpos = None
@@ -342,7 +399,7 @@ class PnPRoboarmCosmosChain2MicrowaveCloseOn(Kitchen):
             completed = self._chain_stage
             self._chain_stage += 1
             if completed in getattr(type(self), "CHAIN_RESET_ARM_AFTER_STAGES", ()):
-                _restore_chain_init_arm_gripper(self)
+                _restore_chain_init_arm_gripper_smooth(self)
 
     @property
     def chain_stage(self) -> int:
@@ -400,6 +457,7 @@ class PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen(Kitchen):
     EXCLUDE_LAYOUTS = [8]
 
     def __init__(self, *args, **kwargs):
+        kwargs.setdefault("obj_registries", ("aigen", "objaverse"))
         super().__init__(*args, **kwargs)
         self._chain_stage = 0
         self._chain_init_arm_qpos = None
@@ -422,8 +480,8 @@ class PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen(Kitchen):
             completed = self._chain_stage
             self._chain_stage += 1
             if completed in getattr(type(self), "CHAIN_RESET_ARM_AFTER_STAGES", ()):
-                _restore_chain_init_arm_gripper(self)
-                # Arm teleport can crack the door; open door forces off in Microwave.update_state.
+                _restore_chain_init_arm_gripper_smooth(self)
+                # Arm motion can crack the door; open door forces off in Microwave.update_state.
                 # Re-seal before start/stop so door_state does not fight the turn-off stage.
                 if self._chain_stage in (1, 2):
                     self.microwave.set_door_state(min=0.0, max=0.0, env=self, rng=self.rng)
@@ -506,6 +564,162 @@ class PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen(Kitchen):
             if joint_p < 0.90:
                 return False
         return True
+
+
+class PnPRoboarmCosmosChain6PotatoMwPlate(Kitchen):
+    """
+    Counter → microwave (potato + plate in MW), close, on, off, open, then pick to counter plate.
+    Same uninterrupted sim as other chain envs; arm returns to post-reset pose smoothly between stages.
+    """
+
+    CHAIN_STAGE_HORIZON_NAMES = (
+        "PnPCounterToMicrowave",
+        "CloseSingleDoor",
+        "TurnOnMicrowave",
+        "TurnOffMicrowave",
+        "OpenSingleDoor",
+        "PnPMicrowaveToCounter",
+    )
+    CHAIN_RESET_ARM_AFTER_STAGES = (0, 1, 2, 3, 4)
+    EXCLUDE_LAYOUTS = [8]
+
+    def __init__(self, obj_groups=("potato",), exclude_obj_groups=None, *args, **kwargs):
+        self.obj_groups = obj_groups
+        self.exclude_obj_groups = exclude_obj_groups
+        kwargs.setdefault("obj_registries", ("aigen", "objaverse"))
+        super().__init__(*args, **kwargs)
+        self._chain_stage = 0
+        self._chain_init_arm_qpos = None
+        self._chain_init_gripper_qpos = None
+
+    def _setup_kitchen_references(self):
+        super()._setup_kitchen_references()
+        self.microwave = self.register_fixture_ref(
+            "microwave",
+            dict(id=FixtureType.MICROWAVE),
+        )
+        self.counter = self.register_fixture_ref(
+            "counter",
+            dict(id=FixtureType.COUNTER, ref=self.microwave),
+        )
+        self.distr_counter = self.register_fixture_ref(
+            "distr_counter",
+            dict(id=FixtureType.COUNTER, ref=self.microwave),
+        )
+        self.init_robot_base_pos = self.microwave
+
+    def _reset_internal(self):
+        super()._reset_internal()
+        self._chain_stage = 0
+        self.microwave.set_door_state(min=0.90, max=1.0, env=self, rng=self.rng)
+        _snapshot_chain_init_arm_gripper(self)
+
+    def advance_chain_stage(self):
+        last = len(type(self).CHAIN_STAGE_HORIZON_NAMES) - 1
+        if self._chain_stage < last:
+            completed = self._chain_stage
+            self._chain_stage += 1
+            if completed in getattr(type(self), "CHAIN_RESET_ARM_AFTER_STAGES", ()):
+                _restore_chain_init_arm_gripper_smooth(self)
+                if self._chain_stage in (2, 3):
+                    self.microwave.set_door_state(min=0.0, max=0.0, env=self, rng=self.rng)
+                    self.sim.forward()
+
+    @property
+    def chain_stage(self) -> int:
+        return self._chain_stage
+
+    def get_ep_meta(self):
+        ep_meta = super().get_ep_meta()
+        if self._chain_stage == 0:
+            obj_lang = self.get_obj_lang()
+            ep_meta["lang"] = f"pick the {obj_lang} from the counter and place it in the microwave"
+        elif self._chain_stage == 1:
+            ep_meta["lang"] = "close the microwave door"
+        elif self._chain_stage == 2:
+            ep_meta["lang"] = "press the start button on the microwave"
+        elif self._chain_stage == 3:
+            ep_meta["lang"] = "press the stop button on the microwave"
+        elif self._chain_stage == 4:
+            ep_meta["lang"] = "open the microwave door"
+        else:
+            obj_lang = self.get_obj_lang()
+            cont_lang = self.get_obj_lang(obj_name="container")
+            ep_meta["lang"] = (
+                f"pick the {obj_lang} from the microwave and place it on {cont_lang} located on the counter"
+            )
+        return ep_meta
+
+    def _get_obj_cfgs(self):
+        return [
+            dict(
+                name="obj",
+                obj_groups=self.obj_groups,
+                exclude_obj_groups=self.exclude_obj_groups,
+                graspable=True,
+                microwavable=True,
+                placement=dict(
+                    fixture=self.counter,
+                    sample_region_kwargs=dict(ref=self.microwave),
+                    size=(0.30, 0.30),
+                    pos=("ref", -1.0),
+                    try_to_place_in="container",
+                ),
+            ),
+            dict(
+                name="container",
+                obj_groups=("plate",),
+                placement=dict(
+                    fixture=self.microwave,
+                    size=(0.05, 0.05),
+                    ensure_object_boundary_in_range=False,
+                ),
+            ),
+            dict(
+                name="distr_counter",
+                obj_groups="all",
+                placement=dict(
+                    fixture=self.distr_counter,
+                    sample_region_kwargs=dict(ref=self.microwave),
+                    size=(0.30, 0.30),
+                    pos=("ref", 1.0),
+                ),
+            ),
+        ]
+
+    def _check_success(self):
+        if self._chain_stage == 0:
+            obj = self.objects["obj"]
+            container = self.objects["container"]
+            oc = self.check_contact(obj, container)
+            mc = self.check_contact(container, self.microwave)
+            return oc and mc and OU.gripper_obj_far(self)
+        if self._chain_stage == 1:
+            door_state = self.microwave.get_door_state(env=self)
+            for joint_p in door_state.values():
+                if joint_p > 0.05:
+                    return False
+            return True
+        if self._chain_stage == 2:
+            turned_on = self.microwave.get_state()["turned_on"]
+            far = self.microwave.gripper_button_far(self, button="start_button")
+            return bool(turned_on and far)
+        if self._chain_stage == 3:
+            mw = self.microwave
+            robot = self.robots[0]
+            d_best = chain4_turnoff_best_distance_to_stop(self)
+            contact = bool(self.check_contact(robot.gripper["right"], f"{mw.name}_stop_button"))
+            if contact or d_best <= CHAIN4_TURNOFF_PROXIMITY_M:
+                mw._turned_on = False
+                return True
+            return False
+        if self._chain_stage == 4:
+            door_state = self.microwave.get_door_state(env=self)
+            for joint_p in door_state.values():
+                if joint_p < 0.90:
+                    return False
+            return True
+        return OU.check_obj_in_receptacle(self, "obj", "container") and OU.gripper_obj_far(self)
 
 
 class PnPRoboarmCosmosChain2DrawerOpenClose(OpenDrawer):
