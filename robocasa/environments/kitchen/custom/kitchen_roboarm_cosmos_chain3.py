@@ -123,11 +123,42 @@ def chain4_turnoff_debug_snapshot(env) -> dict:
     }
 
 
-def write_chain4_turnoff_stage_debug_log(attempt_dir: Path, env, episode_success: bool) -> None:
-    """Append episode summary after per-step JSONL (chain4 stage 2 only)."""
-    if type(env).__name__ != "PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen":
+# Env class name → chain_stage index where TurnOffMicrowave-style success runs (proximity/contact fix).
+_CHAIN_TURNOFF_DEBUG_STAGE_BY_CLASS = {
+    "PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen": 2,
+    "PnPRoboarmCosmosChain6PotatoMwPlate": 3,
+}
+
+
+def _chain_turnoff_step_debug_maybe(env) -> None:
+    """If orchestrator opened ``_chain4_turnoff_debug_fp``, append one JSONL line (chain4 st2 / chain6 st3)."""
+    fp = getattr(env, "_chain4_turnoff_debug_fp", None)
+    if fp is None:
         return
-    if int(getattr(env, "chain_stage")) != 2:
+    want = _CHAIN_TURNOFF_DEBUG_STAGE_BY_CLASS.get(type(env).__name__)
+    if want is None or int(getattr(env, "_chain_stage")) != want:
+        return
+    row = chain4_turnoff_debug_snapshot(env)
+    fp.write(json.dumps(row, sort_keys=True) + "\n")
+    env._chain4_turnoff_min_eef = min(
+        getattr(env, "_chain4_turnoff_min_eef", float("inf")), float(row["distance_eef_to_stop_m"])
+    )
+    mg = row.get("distance_min_finger_geom_to_stop_m")
+    if mg is not None:
+        env._chain4_turnoff_min_finger_geom = min(
+            getattr(env, "_chain4_turnoff_min_finger_geom", float("inf")), float(mg)
+        )
+    env._chain4_turnoff_min_best = min(
+        getattr(env, "_chain4_turnoff_min_best", float("inf")), float(row["distance_best_to_stop_m"])
+    )
+    if row["stop_button_contact"]:
+        env._chain4_turnoff_contact_ever = True
+
+
+def write_chain4_turnoff_stage_debug_log(attempt_dir: Path, env, episode_success: bool) -> None:
+    """Append episode summary after per-step JSONL (chain4 stage 2 / chain6 stage 3)."""
+    want = _CHAIN_TURNOFF_DEBUG_STAGE_BY_CLASS.get(type(env).__name__)
+    if want is None or int(getattr(env, "chain_stage")) != want:
         return
     path = Path(attempt_dir) / "turnoff_stage_debug.log"
     snap = chain4_turnoff_debug_snapshot(env)
@@ -505,23 +536,7 @@ class PnPRoboarmCosmosChain4MicrowaveCloseOnOffOpen(Kitchen):
 
     def step(self, action):
         obs, reward, done, info = super().step(action)
-        fp = getattr(self, "_chain4_turnoff_debug_fp", None)
-        if fp is not None and self._chain_stage == 2:
-            row = chain4_turnoff_debug_snapshot(self)
-            fp.write(json.dumps(row, sort_keys=True) + "\n")
-            self._chain4_turnoff_min_eef = min(
-                getattr(self, "_chain4_turnoff_min_eef", float("inf")), float(row["distance_eef_to_stop_m"])
-            )
-            mg = row.get("distance_min_finger_geom_to_stop_m")
-            if mg is not None:
-                self._chain4_turnoff_min_finger_geom = min(
-                    getattr(self, "_chain4_turnoff_min_finger_geom", float("inf")), float(mg)
-                )
-            self._chain4_turnoff_min_best = min(
-                getattr(self, "_chain4_turnoff_min_best", float("inf")), float(row["distance_best_to_stop_m"])
-            )
-            if row["stop_button_contact"]:
-                self._chain4_turnoff_contact_ever = True
+        _chain_turnoff_step_debug_maybe(self)
         return obs, reward, done, info
 
     def _get_obj_cfgs(self):
@@ -649,6 +664,11 @@ class PnPRoboarmCosmosChain6PotatoMwPlate(Kitchen):
                 f"pick the {obj_lang} from the microwave and place it on {cont_lang} located on the counter"
             )
         return ep_meta
+
+    def step(self, action):
+        obs, reward, done, info = super().step(action)
+        _chain_turnoff_step_debug_maybe(self)
+        return obs, reward, done, info
 
     def _get_obj_cfgs(self):
         return [
