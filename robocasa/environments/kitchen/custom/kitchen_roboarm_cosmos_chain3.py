@@ -1157,7 +1157,10 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
         """Carrot on plate inside MW; tolerant vs flaky contacts when plate+carrot+MW overlap."""
         plate = self.objects["mw_plate"]
         carrot = self.objects["obj_mw"]
-        if not self.check_contact(plate, self.microwave):
+        plate_in_mw = self.check_contact(plate, self.microwave) or OU.obj_inside_of(
+            self, "mw_plate", self.microwave, partial_check=True
+        )
+        if not plate_in_mw:
             return False
         oc = self.check_contact(carrot, plate)
         if oc:
