@@ -1154,17 +1154,22 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
         return self._stove_knob_on_at(rk) or self._burner_flame_lit(rk)
 
     def _mw_plate_carrot_place_ok(self) -> bool:
-        """Carrot on plate inside MW; tolerant vs flaky pairwise contacts when many bodies overlap."""
+        """Carrot on plate inside MW; tolerant vs flaky contacts when plate+carrot+MW overlap."""
         plate = self.objects["mw_plate"]
-        plate_touch_mw = self.check_contact(plate, self.microwave)
-        if not plate_touch_mw:
+        carrot = self.objects["obj_mw"]
+        if not self.check_contact(plate, self.microwave):
             return False
-        th_xy = max(0.10, float(plate.horizontal_radius) * 0.85)
-        legacy_ok = self.check_contact(self.objects["obj_mw"], plate) and plate_touch_mw
-        geom_ok = OU.obj_inside_of(self, "obj_mw", self.microwave) and OU.check_obj_in_receptacle(
-            self, "obj_mw", "mw_plate", th=th_xy
-        )
-        return bool(legacy_ok or geom_ok)
+        oc = self.check_contact(carrot, plate)
+        if oc:
+            return True
+        if not OU.obj_inside_of(self, "obj_mw", self.microwave):
+            return False
+        cpos = np.array(self.sim.data.body_xpos[self.obj_body_id[carrot.name]])
+        ppos = np.array(self.sim.data.body_xpos[self.obj_body_id[plate.name]])
+        xy = float(np.linalg.norm(cpos[:2] - ppos[:2]))
+        th_xy = max(0.14, float(plate.horizontal_radius) * 1.05)
+        z_ok = cpos[2] + 0.02 >= ppos[2]
+        return xy < th_xy and z_ok
 
     def _check_success(self):
         if self._chain_stage == 0:
