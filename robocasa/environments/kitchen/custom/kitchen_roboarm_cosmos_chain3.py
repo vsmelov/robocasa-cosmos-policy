@@ -1162,13 +1162,13 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
         oc = self.check_contact(carrot, plate)
         if oc:
             return True
-        if not OU.obj_inside_of(self, "obj_mw", self.microwave):
+        if not OU.obj_inside_of(self, "obj_mw", self.microwave, partial_check=True):
             return False
         cpos = np.array(self.sim.data.body_xpos[self.obj_body_id[carrot.name]])
         ppos = np.array(self.sim.data.body_xpos[self.obj_body_id[plate.name]])
         xy = float(np.linalg.norm(cpos[:2] - ppos[:2]))
-        th_xy = max(0.14, float(plate.horizontal_radius) * 1.05)
-        z_ok = cpos[2] + 0.02 >= ppos[2]
+        th_xy = max(0.18, float(plate.horizontal_radius) * 1.15)
+        z_ok = cpos[2] + 0.04 >= ppos[2]
         return xy < th_xy and z_ok
 
     def _check_success(self):
