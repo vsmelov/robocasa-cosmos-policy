@@ -1110,11 +1110,18 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
         return bool(0.35 <= np.abs(knob_value) <= 2 * np.pi - 0.35)
 
     def _burner_location_under_container(self):
-        """Burner key whose site is nearest the pan (``container``) XY; None if pan not on stove."""
+        """Burner key under the pan (``container``). Prefer ``_recipe_knob`` when placement used that loc."""
         container = self.objects["container"]
         obj_pos = np.array(self.sim.data.body_xpos[self.obj_body_id[container.name]])[0:2]
         if not OU.check_obj_fixture_contact(self, "container", self.stove):
             return None
+        rk = self._recipe_knob
+        if rk is not None:
+            site_r = self.stove.burner_sites.get(rk)
+            if site_r is not None:
+                bp = np.array(self.sim.data.get_site_xpos(site_r.get("name")))[0:2]
+                if float(np.linalg.norm(bp - obj_pos)) <= 0.20:
+                    return rk
         best_loc = None
         best_d = float("inf")
         for location, site in self.stove.burner_sites.items():
@@ -1149,9 +1156,11 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
             return pan_on_stove and potato_in_pan and gripper_clear
         if self._chain_stage == 1:
             loc = self._burner_location_under_container()
-            if loc is None:
-                return False
-            return self._stove_knob_on_at(loc) and OU.gripper_obj_far(self, obj_name="container")
+            if loc is not None:
+                return self._stove_knob_on_at(loc)
+            if self._recipe_knob is not None and self._recipe_knob in self.stove.get_knobs_state(env=self):
+                return self._stove_knob_on_at(self._recipe_knob)
+            return False
         if self._chain_stage == 2:
             return self._mw_door_open_ok()
         if self._chain_stage == 3:
