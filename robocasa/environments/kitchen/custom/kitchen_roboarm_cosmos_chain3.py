@@ -969,13 +969,16 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
             "counter_mw", dict(id=FixtureType.COUNTER, ref=self.microwave)
         )
         self.init_robot_base_pos = self.stove
+        # Before _create_objects → _get_obj_cfgs: pick burner/knob so pan placement matches success check.
+        valid_knobs = [k for (k, v) in self.stove.knob_joints.items() if v is not None]
+        if not valid_knobs:
+            raise RuntimeError("PnPRoboarmCosmosChainRecipeStoveMwV1: stove has no knob joints")
+        self._recipe_knob = self.rng.choice(list(valid_knobs))
 
     def _reset_internal(self):
         super()._reset_internal()
         self._chain_stage = 0
         self.microwave.set_door_state(min=0.0, max=0.0, env=self, rng=self.rng)
-        valid_knobs = [k for (k, v) in self.stove.knob_joints.items() if v is not None]
-        self._recipe_knob = self.rng.choice(list(valid_knobs))
         self.stove.set_knob_state(mode="off", knob=self._recipe_knob, env=self, rng=self.rng)
         _snapshot_chain_init_arm_gripper(self)
 
@@ -985,7 +988,9 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
             completed = self._chain_stage
             self._chain_stage += 1
             if completed in getattr(type(self), "CHAIN_RESET_ARM_AFTER_STAGES", ()):
-                _restore_chain_init_arm_gripper_smooth(self)
+                dur_raw = os.environ.get("CHAIN_RECIPE_ARM_HOME_DURATION_S", "").strip()
+                arm_home_s = float(dur_raw) if dur_raw else None
+                _restore_chain_init_arm_gripper_smooth(self, duration_s=arm_home_s)
                 if self._chain_stage in (5, 6):
                     self.microwave.set_door_state(min=0.0, max=0.0, env=self, rng=self.rng)
                     self.sim.forward()
@@ -1041,6 +1046,7 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
                 placement=dict(
                     fixture=self.stove,
                     ensure_object_boundary_in_range=False,
+                    sample_region_kwargs=dict(locs=[self._recipe_knob]),
                     size=(0.02, 0.02),
                     rotation=[(-3 * np.pi / 8, -np.pi / 4), (np.pi / 4, 3 * np.pi / 8)],
                 ),
