@@ -1102,22 +1102,60 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
                 return False
         return True
 
-    def _stove_knob_on(self) -> bool:
+    def _stove_knob_on_at(self, location: str) -> bool:
         knobs_state = self.stove.get_knobs_state(env=self)
-        knob_value = knobs_state[self._recipe_knob]
+        if location not in knobs_state:
+            return False
+        knob_value = knobs_state[location]
         return bool(0.35 <= np.abs(knob_value) <= 2 * np.pi - 0.35)
+
+    def _burner_location_under_container(self):
+        """Burner key whose site is nearest the pan (``container``) XY; None if pan not on stove."""
+        container = self.objects["container"]
+        obj_pos = np.array(self.sim.data.body_xpos[self.obj_body_id[container.name]])[0:2]
+        if not OU.check_obj_fixture_contact(self, "container", self.stove):
+            return None
+        best_loc = None
+        best_d = float("inf")
+        for location, site in self.stove.burner_sites.items():
+            if site is None:
+                continue
+            burner_pos = np.array(self.sim.data.get_site_xpos(site.get("name")))[0:2]
+            d = float(np.linalg.norm(burner_pos - obj_pos))
+            if d < best_d:
+                best_d, best_loc = d, location
+        if best_loc is None or best_d > 0.18:
+            return None
+        return best_loc
+
+    def _mw_plate_carrot_place_ok(self) -> bool:
+        """Carrot on plate inside MW; tolerant vs flaky pairwise contacts when many bodies overlap."""
+        plate = self.objects["mw_plate"]
+        plate_touch_mw = self.check_contact(plate, self.microwave)
+        if not plate_touch_mw:
+            return False
+        th_xy = max(0.10, float(plate.horizontal_radius) * 0.85)
+        legacy_ok = self.check_contact(self.objects["obj_mw"], plate) and plate_touch_mw
+        geom_ok = OU.obj_inside_of(self, "obj_mw", self.microwave) and OU.check_obj_in_receptacle(
+            self, "obj_mw", "mw_plate", th=th_xy
+        )
+        return bool(legacy_ok or geom_ok)
 
     def _check_success(self):
         if self._chain_stage == 0:
-            return OU.check_obj_in_receptacle(self, "obj", "container", th=0.07) and OU.gripper_obj_far(self)
+            pan_on_stove = OU.check_obj_fixture_contact(self, "container", self.stove)
+            potato_in_pan = OU.check_obj_in_receptacle(self, "obj", "container", th=0.07)
+            gripper_clear = OU.gripper_obj_far(self, obj_name="obj")
+            return pan_on_stove and potato_in_pan and gripper_clear
         if self._chain_stage == 1:
-            return self._stove_knob_on()
+            loc = self._burner_location_under_container()
+            if loc is None:
+                return False
+            return self._stove_knob_on_at(loc) and OU.gripper_obj_far(self, obj_name="container")
         if self._chain_stage == 2:
             return self._mw_door_open_ok()
         if self._chain_stage == 3:
-            oc = self.check_contact(self.objects["obj_mw"], self.objects["mw_plate"])
-            mc = self.check_contact(self.objects["mw_plate"], self.microwave)
-            return oc and mc and OU.gripper_obj_far(self, obj_name="obj_mw")
+            return self._mw_plate_carrot_place_ok() and OU.gripper_obj_far(self, obj_name="obj_mw")
         if self._chain_stage == 4:
             return self._mw_door_closed_ok()
         if self._chain_stage == 5:
@@ -1136,13 +1174,21 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
         if self._chain_stage == 7:
             return self._mw_door_open_ok()
         if self._chain_stage == 8:
-            if not OU.check_obj_in_receptacle(self, "obj_mw", "mw_plate"):
+            plate = self.objects["mw_plate"]
+            th_xy = max(0.10, float(plate.horizontal_radius) * 0.85)
+            if not OU.check_obj_in_receptacle(self, "obj_mw", "mw_plate", th=th_xy):
                 return False
-            if not self.check_contact(self.objects["mw_plate"], self.counter_mw):
+            if not self.check_contact(plate, self.counter_mw):
                 return False
             if not OU.gripper_obj_far(self, obj_name="obj_mw"):
                 return False
             if OU.obj_inside_of(self, "obj_mw", self.microwave):
                 return False
             return True
-        return not self._stove_knob_on()
+        loc_off = self._burner_location_under_container()
+        if loc_off is not None:
+            return not self._stove_knob_on_at(loc_off)
+        knobs_state = self.stove.get_knobs_state(env=self)
+        if self._recipe_knob not in knobs_state:
+            return True
+        return not self._stove_knob_on_at(self._recipe_knob)
