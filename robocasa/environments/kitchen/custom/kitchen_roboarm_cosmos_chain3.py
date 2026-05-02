@@ -1107,10 +1107,21 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
         if location not in knobs_state:
             return False
         knob_value = knobs_state[location]
+        # Match ``ManipulateStoveKnob`` / ``Stove.update_state`` on-threshold (radians, wrapped).
         return bool(0.35 <= np.abs(knob_value) <= 2 * np.pi - 0.35)
 
+    def _burner_flame_lit(self, location: str) -> bool:
+        """True if flame site opacity is on (after ``Stove.update_state`` each step)."""
+        try:
+            site_id = self.sim.model.site_name2id(
+                "{}burner_on_{}".format(self.stove.naming_prefix, location)
+            )
+        except Exception:
+            return False
+        return float(self.sim.model.site_rgba[site_id][3]) > 0.2
+
     def _burner_location_under_container(self):
-        """Burner key under the pan (``container``). Prefer ``_recipe_knob`` when placement used that loc."""
+        """Nearest burner under pan (for turn-off); None if pan not on stove."""
         container = self.objects["container"]
         obj_pos = np.array(self.sim.data.body_xpos[self.obj_body_id[container.name]])[0:2]
         if not OU.check_obj_fixture_contact(self, "container", self.stove):
@@ -1135,6 +1146,13 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
             return None
         return best_loc
 
+    def _recipe_target_burner_on(self) -> bool:
+        """Stage 1 success: the instructed burner (``_recipe_knob``) matches pan placement + lang."""
+        rk = self._recipe_knob
+        if rk is None:
+            return False
+        return self._stove_knob_on_at(rk) or self._burner_flame_lit(rk)
+
     def _mw_plate_carrot_place_ok(self) -> bool:
         """Carrot on plate inside MW; tolerant vs flaky pairwise contacts when many bodies overlap."""
         plate = self.objects["mw_plate"]
@@ -1155,12 +1173,7 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
             gripper_clear = OU.gripper_obj_far(self, obj_name="obj")
             return pan_on_stove and potato_in_pan and gripper_clear
         if self._chain_stage == 1:
-            loc = self._burner_location_under_container()
-            if loc is not None:
-                return self._stove_knob_on_at(loc)
-            if self._recipe_knob is not None and self._recipe_knob in self.stove.get_knobs_state(env=self):
-                return self._stove_knob_on_at(self._recipe_knob)
-            return False
+            return self._recipe_target_burner_on()
         if self._chain_stage == 2:
             return self._mw_door_open_ok()
         if self._chain_stage == 3:
@@ -1194,10 +1207,7 @@ class PnPRoboarmCosmosChainRecipeStoveMwV1(Kitchen):
             if OU.obj_inside_of(self, "obj_mw", self.microwave):
                 return False
             return True
-        loc_off = self._burner_location_under_container()
-        if loc_off is not None:
-            return not self._stove_knob_on_at(loc_off)
-        knobs_state = self.stove.get_knobs_state(env=self)
-        if self._recipe_knob not in knobs_state:
+        rk = self._recipe_knob
+        if rk is None:
             return True
-        return not self._stove_knob_on_at(self._recipe_knob)
+        return (not self._stove_knob_on_at(rk)) and (not self._burner_flame_lit(rk))
