@@ -291,7 +291,9 @@ def _restore_chain_init_arm_gripper_smooth(env, duration_s=None):
     robot = env.robots[0]
     sim = env.sim
     cf = float(getattr(env, "control_freq", 20) or 20)
-    n = max(2, int(round(dur * cf)))
+    hz_raw = os.environ.get("CHAIN_RECIPE_ARM_HOME_SAMPLE_HZ", "").strip()
+    sample_hz = float(hz_raw) if hz_raw else max(cf * 4.0, 48.0)
+    n = max(16, int(round(dur * sample_hz)))
     arm_i = np.asarray(robot._ref_arm_joint_pos_indexes, dtype=int)
     grip_i = _chain_flat_gripper_qpos_indices(robot)
     start_arm = np.array(sim.data.qpos[arm_i], dtype=np.float64, copy=True)
@@ -322,6 +324,8 @@ def _restore_chain_init_arm_gripper_smooth(env, duration_s=None):
                 cap(env)
             except Exception:
                 pass
+    for _ in range(4):
+        sim.forward()
 
 
 class PnPRoboarmCosmosChain3(PnP):
